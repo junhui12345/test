@@ -1,0 +1,662 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title></title>
+    <script src="https://code.createjs.com/1.0.0/createjs.min.js"></script>
+    <style>
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            border: #6ce26c 2px solid;
+        }
+
+        button {
+            margin: 5px;
+        }
+
+        #stageGLCanvas {
+            z-index: 2;
+        }
+
+        #container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: auto;
+        }
+
+        #buttonContainer {
+            display: flex;
+            flex-direction: row;
+            justify-content: center;
+            padding: 10px;
+        }
+
+        #canvasContainer {
+            position: relative;
+            padding: 10px;
+            display: inline-block;
+            overflow: auto;
+        }
+    </style>
+    <script>
+        var stageGL;
+        var zoneStage;
+        var cellSize = {
+            width: 100,
+            height: 200
+        };
+        var bevelSize = 20, xDistance = 100, yDistance = 210, colCount = 5, rowCount = 2, distance = 10;
+        var marginFromBevel = 15; //TODO 실제 코드에서는 필요 없는 값임. 테스트시 셀의 영역을 벗어나지 않게 하기 위해 임시로 설정
+        var drawColLineCount = 15;
+        var drawRowLineCount = 15;
+        var canvasWidth = 960;
+        var canvasHeight = 800;
+
+        var _mousePrevPoint;
+        var _mode = "";
+        var _defectCircleList;
+        var _cellList;
+        var _rowCellsContainer;
+        var _dragStartPoint;
+        var _dragEndPoint;
+        var _isDragging;
+        var _selectionRect;
+
+        function init() {
+            initCanvas();
+            stageGL = new createjs.StageGL("stageGLCanvas", {transparent: true});
+            zoneStage = new createjs.Stage("zoneCanvas");
+            _selectionRect = new createjs.Shape();
+            stageGL.nextStage = zoneStage;
+
+            stageGL.mouseMoveOutside = true;
+            zoneStage.mouseMoveOutside = true;
+            stageGL.initialX = stageGL.x;
+            stageGL.initialY = stageGL.y;
+            zoneStage.initialX = zoneStage.x;
+            zoneStage.initialY = zoneStage.y;
+
+            createCell();
+            createCircle();
+            zoomEvent();
+            stageMouseEvent();
+
+            calculateContainerBounds(_rowCellsContainer);
+            var canvas = stageGL.canvas;
+            var bounds = _rowCellsContainer.getBounds(); // 컨테이너의 경계
+            var containerWidth = bounds.width; // 컨테이너의 너비
+            var containerHeight = bounds.height; // 컨테이너의 높이
+            _rowCellsContainer.x = (canvas.width - containerWidth) / 2;
+            _rowCellsContainer.y = (canvas.height - containerHeight) / 2;
+            _rowCellsContainer.cache(bounds.x, bounds.y, bounds.width, bounds.height);
+
+            _defectCircleList = [];
+            _cellList = [];
+            _rowCellsContainer.children.forEach(rowContainer => {
+                rowContainer.children.forEach(child => {
+                    if (child instanceof createjs.Container) {
+                        _defectCircleList.push(child);
+                    }
+                    if (child instanceof createjs.Shape) {
+                        _cellList.push(child);
+                    }
+                })
+            });
+
+            zoneStage.update();
+            stageGL.update();
+        }
+
+        function initCanvas() {
+            addCanvas("stageGLCanvas");
+            addCanvas("zoneCanvas");
+
+            var canvasContainer = document.getElementById("canvasContainer");
+            canvasContainer.style.width = canvasWidth + "px";
+            canvasContainer.style.height = canvasHeight + "px";
+        }
+
+        function addCanvas(canvasId) {
+            var canvasContainer = document.getElementById("canvasContainer");
+            var canvas = document.createElement("canvas");
+
+            canvas.id = canvasId
+            canvas.style.position = "absolute";
+            canvas.style.left = "0px";
+            canvas.style.top = "0px";
+            canvas.style.zIndex = "1";
+            canvas.width = canvasWidth;
+            canvas.height = canvasHeight;
+            // 컨텍스트 메뉴 비활성화를 위한 이벤트 리스너 추가
+            canvas.addEventListener("contextmenu", function(event) {
+                event.preventDefault(); // 컨텍스트 메뉴 이벤트 막기
+            });
+
+            canvasContainer.appendChild(canvas);
+        }
+
+        function createCell() {
+            _rowCellsContainer = new createjs.Container();
+            var prevRowContainerY = 0;
+            for (var row = 0; row < rowCount; row++) {
+                var rowContainer = new createjs.Container();
+                for (var col = 0; col < colCount; col++) {
+                    var leftCell = createCellLeft(col);
+                    leftCell.x = col * (xDistance + distance);
+                    leftCell.y = (row+1) * prevRowContainerY + distance;
+                    rowContainer.addChild(leftCell);
+
+                    var rightCell = createCellRight(col);
+                    rightCell.x = col * (xDistance + distance);
+                    rightCell.y = (row+1) * prevRowContainerY + yDistance + distance;
+                    calculateBounds(rightCell);
+                    rowContainer.addChild(rightCell);
+                }
+                calculateContainerBounds(rowContainer);
+                var rowHeight = 0;
+                rowContainer.children.forEach(function (cell) {
+                    var cellBounds = cell.getBounds();
+                    rowHeight = Math.max(rowHeight, cellBounds.height);
+                });
+                rowHeight += distance; // 각 행 사이 추가 간격 포함
+                prevRowContainerY = rowContainer.y + rowHeight;
+
+                _rowCellsContainer.addChild(rowContainer);
+            }
+
+            stageGL.addChild(_rowCellsContainer);
+        }
+
+        function createCellRight(index) {
+            var cell = new createjs.Shape();
+            cell.name = 'rc' + index;
+            cell.type = "cell";
+            cell.graphics.setStrokeStyle(1)
+                .beginStroke("blue")
+                .moveTo(0, 0)
+                .lineTo(cellSize.width - bevelSize, 0)
+                .lineTo(cellSize.width, bevelSize)
+                .lineTo(cellSize.width, cellSize.height - bevelSize)
+                .lineTo(cellSize.width - bevelSize, cellSize.height)
+                .lineTo(0, cellSize.height)
+                .closePath();
+            calculateBounds(cell);
+            drawHorizontalLinesRight(cell);
+            drawVerticalLinesRight(cell);
+            return cell;
+        }
+
+        function createCellLeft(index) {
+            var cell = new createjs.Shape();
+            cell.name = "lc" + index;
+            cell.type = "cell";
+            cell.graphics.setStrokeStyle(1)
+                .beginStroke("red")
+                .moveTo(bevelSize, 0)
+                .lineTo(cellSize.width, 0)
+                .lineTo(cellSize.width, cellSize.height)
+                .lineTo(bevelSize, cellSize.height)
+                .lineTo(0, cellSize.height - bevelSize)
+                .lineTo(0, bevelSize)
+                .lineTo(bevelSize, 0);
+            calculateBounds(cell);
+            drawHorizontalLinesLeft(cell);
+            drawVerticalLinesLeft(cell);
+            calculateBounds(cell);
+            return cell;
+        }
+
+        function drawHorizontalLinesRight(cell) {
+            var lineSpace = cellSize.height / drawRowLineCount;
+
+            for (var i = 0; i <= drawRowLineCount; i++) {
+                var y = i * lineSpace;
+                var startX = 0;
+                var endX = cellSize.width;
+
+                if (y < bevelSize) {
+                    endX = cellSize.width - (bevelSize - y);
+                }
+
+                if (y > cellSize.height - bevelSize) {
+                    endX = cellSize.width - (y - (cellSize.height - bevelSize));
+                }
+
+                cell.graphics.setStrokeStyle(1).beginStroke("black");
+                cell.graphics.moveTo(startX, y);
+                cell.graphics.lineTo(endX, y);
+            }
+        }
+
+        function drawHorizontalLinesLeft(cell) {
+            var lineSpace = cellSize.height / drawRowLineCount;
+
+            for (var i = 0; i <= drawRowLineCount; i++) {
+                var y = i * lineSpace;
+                var startX = 0;
+                var endX = cellSize.width;
+
+                if (y > cellSize.height - bevelSize) {
+                    startX = (y - (cellSize.height - bevelSize));
+                }
+
+                if (y < bevelSize) {
+                    startX = bevelSize - y;
+                }
+
+                cell.graphics.setStrokeStyle(1).beginStroke("black");
+                cell.graphics.moveTo(startX, y);
+                cell.graphics.lineTo(endX, y);
+            }
+        }
+
+        function drawVerticalLinesRight(cell) {
+            var lineSpace = cellSize.width / drawColLineCount;
+
+            for (var i = 0; i < drawColLineCount; i++) {
+                var x = i * lineSpace;
+                if (x === 0 || x === cellSize.width) continue;
+
+                var yStart = 0;
+                var yEnd = cellSize.height;
+
+                if (x >= cellSize.width - bevelSize) {
+                    var offset = x - (cellSize.width - bevelSize);
+                    yStart = offset;
+                    yEnd = cellSize.height - offset;
+                }
+
+                cell.graphics.setStrokeStyle(1).beginStroke("black");
+                cell.graphics.moveTo(x, yStart);
+                cell.graphics.lineTo(x, yEnd);
+            }
+        }
+
+        function drawVerticalLinesLeft(cell) {
+            var lineSpace = cellSize.width / drawColLineCount;
+
+            for (var i = 0; i < drawColLineCount; i++) {
+                var x = i * lineSpace;
+                if (x === 0 || x === cellSize.width) continue;
+
+                var yStart = 0;
+                var yEnd = cellSize.height;
+
+                if (x <= bevelSize) {
+                    var offset = bevelSize - x;
+                    yStart = offset;
+                    yEnd = cellSize.height - offset;
+                }
+
+                cell.graphics.setStrokeStyle(1).beginStroke("black");
+                cell.graphics.moveTo(x, yStart);
+                cell.graphics.lineTo(x, yEnd);
+            }
+        }
+
+        function createCircle() {
+            var builder = new createjs.SpriteSheetBuilder();
+            for (var rate = 1; rate <= 3; rate++) {
+                var circle = new createjs.Shape();
+                var radius = 2 * rate;
+                var color = generateRandomColor();
+
+                var stroke = 1;
+                //윤곽선 설정
+                circle.graphics.setStrokeStyle(stroke).beginStroke("#000000"); //원 외곽선
+                circle.graphics.beginFill(color); //원 내부 색상 설정
+                circle.graphics.drawCircle(0, 0, radius);
+                circle.graphics.endStroke();
+                circle.cache(-radius - stroke, -radius - stroke, (radius + stroke) * 2, (radius + stroke) * 2);
+
+                var rectangle = new createjs.Rectangle(-radius - stroke, -radius - stroke, (radius + stroke) * 2, (radius + stroke) * 2);
+                rectangle.radius = radius;
+                builder.addFrame(circle, rectangle);
+            }
+            var spriteSheet = builder.build();
+
+            _rowCellsContainer.children.forEach(rowContainer => {
+                rowContainer.children.forEach(cell => {
+                    var cellBound = cell.getBounds();
+                    var frameNumber = generateRandomNumber();
+
+                    var circleContainer = new createjs.Container();
+                    circleContainer.type = "defectContainer";
+                    circleContainer.name = "defectContainer_" + cell.name;
+                    for (var j = 0; j < 100; j++) {
+                        var cir = new createjs.Sprite(spriteSheet, frameNumber);
+                        cir.type = "defect";
+                        cir.name = 'defect' + j;
+                        cir.initialFrame = frameNumber; // 초기 프레임 기억
+                        cir.on("mousedown", circleMouseDown, this);
+
+                        var marginBevel = bevelSize - marginFromBevel; // 마진 - 15
+                        var minX = cell.x + marginBevel + radius; // 왼쪽 경계
+                        var maxX = cell.x + cellBound.width - marginBevel - radius; // 오른쪽 경계
+                        var minY = cell.y + marginBevel + radius; // 상단 경계
+                        var maxY = cell.y + cellBound.height - marginBevel - radius; // 하단 경계
+
+                        // 원의 중심 좌표가 베벨 처리된 모서리를 제외한 영역 내에 위치하도록 계산
+                        var x = minX + Math.random() * (maxX - minX);
+                        var y = minY + Math.random() * (maxY - minY);
+
+                        cir.initialX = x;
+                        cir.initialY = y;
+                        cir.radius = radius;
+
+                        //TODO marginBevel을 제거하고 영역 벗어나는지 확인
+                        if (x - radius >= cell.x + marginBevel &&
+                            x + radius <= cell.x + cellBound.width - marginBevel &&
+                            y - radius >= cell.y + marginBevel &&
+                            y + radius <= cell.y + cellBound.height - marginBevel) {
+                            // 원이 셀의 베벨 처리된 모서리를 고려한 내부 영역 내에 위치하는 경우
+                            cir.setTransform(x, y);
+                            circleContainer.addChild(cir);
+                        }
+
+                    }
+                    rowContainer.addChild(circleContainer);
+                })
+            });
+        }
+
+        function stageMouseEvent() {
+            zoneStage.on("stagemousedown", stageMouseDownHandler);
+            zoneStage.on("stagemouseup", stageMouseUpHandler);
+            zoneStage.on("stagemousemove", stageMouseMoveHandler);
+        }
+
+        function stageMouseMoveHandler(event) {
+            if (event.nativeEvent.which !== 1) return;
+
+            if (_mode === "MOVE") {
+                if (_mousePrevPoint === null) {
+                    _mousePrevPoint = {
+                        x: event.stageX,
+                        y: event.stageY
+                    };
+                    return;
+                }
+
+                var dx = event.stageX - _mousePrevPoint.x;
+                var dy = event.stageY - _mousePrevPoint.y;
+
+                stageGL.x += dx;
+                stageGL.y += dy;
+                zoneStage.x += dx;
+                zoneStage.y += dy;
+
+                _defectCircleList.forEach(container => {
+                    container.children.forEach(child => {
+                        child.gotoAndStop(child.initialFrame);
+                    });
+                })
+
+                stageGL.update();
+                zoneStage.update();
+
+                _mousePrevPoint = {
+                    x: event.stageX,
+                    y: event.stageY
+                };
+            }
+
+            if (_mode === 'DRAG') {
+                if (!_dragStartPoint) return;
+
+                _dragEndPoint = {
+                    x: event.stageX,
+                    y: event.stageY
+                };
+
+                var x = Math.min(_dragStartPoint.x, _dragEndPoint.x);
+                var y = Math.min(_dragStartPoint.y, _dragEndPoint.y);
+                var width = Math.abs(_dragEndPoint.x - _dragStartPoint.x);
+                var height = Math.abs(_dragEndPoint.y - _dragStartPoint.y);
+
+                _selectionRect.graphics.clear()
+                    .beginStroke("blue")
+                    .drawRect(x, y, width, height);
+
+                _selectionRect.cache(x, y, width, height)
+
+                _defectCircleList.forEach(container => {
+                    container.children.forEach(function (child) {
+                        child.gotoAndStop(child.initialFrame);
+                    });
+                })
+                stageGL.update();
+            }
+        }
+
+        function stageMouseDownHandler(event) {
+            if (event.nativeEvent.which !== 1) return;
+
+            if (_mode === "MOVE") {
+                _mousePrevPoint = {
+                    x: event.stageX,
+                    y: event.stageY
+                };
+            }
+
+            if (_mode === 'DRAG') {
+                //캔버스
+                _dragStartPoint = {
+                    x: event.stageX,
+                    y: event.stageY
+                };
+                _isDragging = true;
+                stageGL.addChild(_selectionRect);
+            }
+        }
+
+        function stageMouseUpHandler(event) {
+            if (event.nativeEvent.which !== 1) return;
+
+            if (_mode === "MOVE") {
+                _mousePrevPoint = null;
+            }
+
+            if (_mode === 'DRAG') {
+                if (_isDragging && _dragStartPoint && _dragEndPoint) {
+                    selectInDragArea(_dragStartPoint, _dragEndPoint);
+
+                    _dragStartPoint = null;
+                    _dragEndPoint = null;
+                    _isDragging = false;
+
+                    _selectionRect.uncache();
+                    stageGL.removeChild(_selectionRect);
+                    stageGL.update();
+                }
+            }
+        }
+
+        function circleMouseDown(evt) {
+            var circle = evt.target;
+            console.log(circle.id, ("(" + circle.x + "," + circle.y + ")"));
+        }
+
+        function selectInDragArea(startPoint, endPoint) {
+            var offsetX = _rowCellsContainer.x;
+            var offsetY = _rowCellsContainer.y;
+
+            var bounds = {
+                x: Math.min(startPoint.x, endPoint.x) - offsetX,
+                y: Math.min(startPoint.y, endPoint.y) - offsetY,
+                width: Math.abs(endPoint.x - startPoint.x),
+                height: Math.abs(endPoint.y - startPoint.y)
+            };
+
+            var updateCacheFlag = false;
+            _defectCircleList.forEach(container => {
+                container.children.forEach(child => {
+                    if (child.x >= bounds.x && child.x <= bounds.x + bounds.width &&
+                        child.y >= bounds.y && child.y <= bounds.y + bounds.height) {
+                        console.log(child.id);
+                        updateCacheFlag = true;
+                    }
+                });
+            })
+
+            if (updateCacheFlag) stageGL.update();
+        }
+
+        function zoomEvent() {
+            var stageGLCanvas = document.getElementById("stageGLCanvas");
+            stageGLCanvas.addEventListener('mousedown', function (event) {
+                if (_mode !== 'VIEW') return;
+                event.preventDefault();
+
+                var scale = (event.button === 0) ? 1.1 : 0.9;
+                //새위치 = (현재 위치 - 확대/축소 중심 위치) * (확대/축소 비욜 + 확대/축소 중심 위치)
+                //현재위치 : 현재 x, y
+                //확대/축소 중심 위치 : 마우스 클릭 x, y
+                //확대/축소 비율 : 줌 1 보다 크게, 줌 아웃 1 보다 작게
+
+                //중심 위치
+                //캔버스 내에서 마우스 클릭 위치
+                //클릭 이벤트 발생 시 event(clientX, clientY)는 document 전체 기준
+                //상대적 위치는 캔버스에서 offset을 고려 해야 함.
+                //캔버스 왼쪽 상단 (0,0)
+                var rect = stageGLCanvas.getBoundingClientRect();
+                //클릭 x 좌표 - 캔버스 왼쪽 경계 까지의 거리
+                var zoomCenterX = event.clientX - rect.left;
+                //클릭 y 좌표 - 캔버스 상단 경계 까지의 거리
+                var zoomCenterY = event.clientY - rect.top;
+
+                _cellList.forEach(cell => {
+                    //현재 위치 계산
+                    //(stage.x stage.y) = (0,0)인 경우
+                    //(child.x, child.y)가 현재 위치
+
+                    //(stage.x, stage.y) != (0,0)
+                    //(child.x + stage.x, child.y + stage.y)가 현재 위치
+
+                    //localToGlobal을 사용 해야 하는가...?
+                    var offsetX = (cell.x + stageGL.x - zoomCenterX) * scale;
+                    var offsetY = (cell.y + stageGL.y - zoomCenterY) * scale;
+                    cell.x = offsetX + zoomCenterX - stageGL.x;
+                    cell.y = offsetY + zoomCenterY - stageGL.y;
+                });
+
+                _defectCircleList.forEach(container => {
+                    container.children.forEach(child => {
+                        var offsetX = (child.x + stageGL.x - zoomCenterX) * scale;
+                        var offsetY = (child.y + stageGL.y - zoomCenterY) * scale;
+
+                        child.x = offsetX + zoomCenterX - stageGL.x;
+                        child.y = offsetY + zoomCenterY - stageGL.y;
+                        child.gotoAndStop(child.initialFrame);
+                    });
+                });
+
+
+                stageGL.update();
+            });
+        }
+
+        function setMode(param) {
+            _mode = param;
+        }
+
+        function reset() {
+            [stageGL, zoneStage].forEach(function (stage) {
+                stage.x = stage.initialX;
+                stage.y = stage.initialY;
+                stage.scaleX = 1;
+                stage.scaleY = 1;
+            });
+
+            _cellList.forEach(function(child) {
+                child.x = child.initialX;
+                child.y = child.initialY;
+            });
+
+            _defectCircleList.forEach(container => {
+                container.children.forEach(child => {
+                    child.x = child.initialX;
+                    child.y = child.initialY;
+
+                    if(child.gotoAndStop) {
+                        child.gotoAndStop(child.initialFrame);
+                    }
+                })
+            });
+
+            stageGL.update();
+            zoneStage.update();
+
+            setMode("VIEW");
+        }
+
+        function calculateBounds(shape) {
+            if (shape === null || shape === undefined) return;
+
+            var minX = Infinity;
+            var minY = Infinity;
+            var maxX = -Infinity;
+            var maxY = -Infinity;
+
+            var instructions = shape.graphics.instructions;
+            for (var i = 0; i < instructions.length; i++) {
+                var instruction = instructions[i];
+                if (instruction.x !== undefined && instruction.y !== undefined) {
+                    minX = Math.min(minX, instruction.x);
+                    minY = Math.min(minX, instruction.y);
+                    maxX = Math.max(maxX, instruction.x);
+                    maxY = Math.max(maxY, instruction.y);
+                }
+            }
+            shape.setBounds(minX, minY, maxX - minX, maxY - minY);
+        }
+
+        // 컨테이너의 경계를 계산하고 설정하는 함수
+        function calculateContainerBounds(container) {
+            var bounds = container.getBounds(); // 기존에 설정된 경계가 있는지 확인
+            if (!bounds) {
+                var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+                container.children.forEach(function (child) {
+                    var childBounds = child.getBounds();
+                    if (childBounds) {
+                        minX = Math.min(minX, child.x + childBounds.x);
+                        minY = Math.min(minY, child.y + childBounds.y);
+                        maxX = Math.max(maxX, child.x + childBounds.x + childBounds.width);
+                        maxY = Math.max(maxY, child.y + childBounds.y + childBounds.height);
+                    }
+                });
+
+                container.setBounds(minX, minY, maxX - minX, maxY - minY);
+            }
+        }
+
+        function generateRandomNumber() {
+            return Math.floor(Math.random() * 10 + 1);
+        }
+
+        function generateRandomColor() {
+            var letters = '0123456789ABCDEF';
+            var color = '#';
+            for (var i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+    </script>
+</head>
+<body onload="init();">
+<div id="container">
+    <div id="canvasContainer">
+    </div>
+    <div id="buttonContainer">
+        <button onclick="setMode('MOVE')">MOVE</button>
+        <button onclick="setMode('VIEW')">VIEW</button>
+        <button onclick="setMode('DRAG')">DRAG</button>
+        <button onclick="reset()">RESET</button>
+    </div>
+</div>
+</body>
+</html>
